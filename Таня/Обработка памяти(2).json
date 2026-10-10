@@ -1,0 +1,446 @@
+{
+  "name": "Обработка памяти",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "9f66c883-39b8-46c6-a502-70c7f3df887f",
+      "name": "Schedule Trigger (раз в 30 мин)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -480,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select distinct t.session_id as telegram_user_id,\n       coalesce(c.last_progress_sync_at, '1970-01-01'::timestamptz) as last_progress_sync_at\nfrom tanya_memory t\nleft join sync_cursors c on c.session_id = t.session_id;",
+        "options": {}
+      },
+      "id": "624d5ee0-4363-403d-8af7-a67e357eafca",
+      "name": "Get students (cursor)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -256,
+        160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "QAUoi9cqfmMGT5iT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "8c54bb42-4566-4a9e-8cd2-43ccabb5cf31",
+      "name": "Готово (все обработаны)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "tanya_memory",
+        "orderBy": "created_at.asc",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.telegram_user_id }}"
+            },
+            {
+              "keyName": "created_at",
+              "condition": "gt",
+              "keyValue": "={{ $json.last_progress_sync_at }}"
+            }
+          ]
+        }
+      },
+      "id": "6d56979e-e95a-4530-af15-aaadd74afb5f",
+      "name": "Get many rows1",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        272,
+        176
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "GNcmJpHyN83My3NJ",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Все строки n8n_chat_histories для ТЕКУЩЕГО студента (безопасно —\n// мы внутри одной итерации Loop students, чужие пользователи сюда не попадут)\nconst rows = $input.all().map(i => i.json);\n\nconst lines = rows.map(r => {\n  const msg = r.message || {};\n  const role = msg.type === 'human' ? 'Ученик' : 'Бот';\n  const content = msg.data?.content ?? msg.content ?? '';\n  return `${role}: ${content}`;\n}).join('\\n');\n\n// created_at отсортирован по возрастанию (order=created_at.asc в запросе),\n// значит последняя строка — самое свежее сообщение из новых\nconst lastMessageAt = rows.length ? rows[rows.length - 1].created_at : null;\nconst idleMinutes = lastMessageAt ? (Date.now() - new Date(lastMessageAt).getTime()) / 60000 : 0;\n\nconst student = $('Loop students').item.json;\n\nreturn [{\n  json: {\n    telegram_user_id: student.telegram_user_id,\n    message_count: rows.length,\n    transcript: lines,\n    last_message_at: lastMessageAt,\n    idle_minutes: idleMinutes\n  }\n}];"
+      },
+      "id": "aa52d377-991c-46b5-9a54-fa89a96cc069",
+      "name": "Build transcript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-1",
+              "leftValue": "={{ $json.message_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b28a74bd-c47e-47a5-ad2c-78b8b8902283",
+      "name": "Есть новые сообщения?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-idle-1",
+              "leftValue": "={{ $json.idle_minutes }}",
+              "rightValue": 20,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "14902e67-d531-46ae-9ee0-b8bf9b825725",
+      "name": "Простой достаточный? (>=20 мин)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-2.5-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-2.5-flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Вот новый кусок текстовой переписки ученика с ИИ-репетитором английского (только новые сообщения с прошлой проверки):\n\n{{ $json.transcript }}\n\nВерни СТРОГО валидный JSON без пояснений и без markdown-обрамления, в формате: {\"topic\": \"короткое название темы/грамматики, которую разбирали\", \"summary\": \"2-3 предложения резюме для памяти ассистента\"}. Если по переписке не разбиралась конкретная тема (просто болтовня/оргвопросы) — верни {\"topic\": \"нет темы\", \"summary\": \"\"}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "1165adf4-ee14-45e6-8349-698d05ba8f4b",
+      "name": "Message a model",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        1248,
+        128
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "ehypoveIlYVLt7tg",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Нативная нода Google Gemini (simplify=true) отдаёт текст в content.parts[0].text.\n// Безопасно перебираем возможные формы ответа.\nconst j = $input.first()?.json ?? {};\nconst raw = j.content?.parts?.[0]?.text\n  ?? j.candidates?.[0]?.content?.parts?.[0]?.text\n  ?? j.text\n  ?? '{}';\nconst cleaned = String(raw).replace(/```json|```/g, '').trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = { topic: 'не удалось извлечь', summary: cleaned.slice(0, 500) };\n}\n\nconst prev = $('Build transcript').item.json ?? {};\n\nreturn [{\n  json: {\n    telegram_user_id: prev.telegram_user_id ?? null,\n    topic: parsed?.topic ?? 'нет темы',\n    summary: parsed?.summary ?? ''\n  }\n}];"
+      },
+      "id": "e0d510dc-731d-4284-93d8-625056128d0c",
+      "name": "Parse Gemini JSON (текст)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "tableId": "hard_memory_tanya",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "session_id",
+              "fieldValue": "={{ $json.telegram_user_id }}"
+            },
+            {
+              "fieldId": "topic",
+              "fieldValue": "={{ $json.topic }}"
+            },
+            {
+              "fieldId": "summary",
+              "fieldValue": "={{ $json.summary }}"
+            }
+          ]
+        }
+      },
+      "id": "65d8f15c-9d77-46ef-8346-2a792326a775",
+      "name": "Create a row",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1824,
+        112
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "GNcmJpHyN83My3NJ",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into sync_cursors (session_id, last_progress_sync_at)\nvalues ($1, $2)\non conflict (session_id) do update\nset last_progress_sync_at = excluded.last_progress_sync_at;",
+        "options": {
+          "queryReplacement": "={{ $('Build transcript').item.json.telegram_user_id }},{{ $('Build transcript').item.json.last_message_at }}"
+        }
+      },
+      "id": "74d6c42d-5a29-4d77-a615-df4c4ea13769",
+      "name": "Сдвинуть курсор (sync_cursors)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2064,
+        112
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "QAUoi9cqfmMGT5iT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "52cf84c5-0f3c-4f5a-83ec-0cb8fd471574",
+      "name": "Loop students",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        0,
+        160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (раз в 30 мин)": {
+      "main": [
+        [
+          {
+            "node": "Get students (cursor)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get students (cursor)": {
+      "main": [
+        [
+          {
+            "node": "Loop students",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get many rows1": {
+      "main": [
+        [
+          {
+            "node": "Build transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build transcript": {
+      "main": [
+        [
+          {
+            "node": "Есть новые сообщения?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Есть новые сообщения?": {
+      "main": [
+        [
+          {
+            "node": "Простой достаточный? (>=20 мин)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop students",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Простой достаточный? (>=20 мин)": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop students",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini JSON (текст)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Gemini JSON (текст)": {
+      "main": [
+        [
+          {
+            "node": "Create a row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create a row": {
+      "main": [
+        [
+          {
+            "node": "Сдвинуть курсор (sync_cursors)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Сдвинуть курсор (sync_cursors)": {
+      "main": [
+        [
+          {
+            "node": "Loop students",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop students": {
+      "main": [
+        [
+          {
+            "node": "Готово (все обработаны)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get many rows1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "fdce24e9-3431-4ee2-967d-36d7deff806b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b908c75d3d43ec5984bdb9f71eed9f18c51d244eda074b0ba136574fd7ac900b"
+  },
+  "nodeGroups": [],
+  "id": "j8oT5v2rDmpJEZr6",
+  "tags": []
+}
